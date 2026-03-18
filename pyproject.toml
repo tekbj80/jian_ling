@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jian-ling"
+version = "0.1.0"
+description = "Lightweight chat session helpers."
+requires-python = ">=3.8"
+dependencies = [
+  "openai",
+  "ipython",
+  "streamlit",
+]
+
+[tool.setuptools]
+packages = ["jian_ling", "jian_ling.streamlit_app"]
