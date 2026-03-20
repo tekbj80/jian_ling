@@ -1,5 +1,5 @@
 import json
-from typing import Generator
+from typing import Generator, Optional
 
 try:
     from IPython import get_ipython
@@ -13,7 +13,24 @@ DEFAULT_MODEL = 'deepseek-chat'
 JSON_RESPONSE_FORMAT = {"type": "json_object"}
 
 
-def get_response(message, client, server_prompt=None, model=DEFAULT_MODEL, stream=False):
+def _completion_kwargs(temperature: Optional[float], top_p: Optional[float]) -> dict:
+    extra = {}
+    if temperature is not None:
+        extra["temperature"] = temperature
+    if top_p is not None:
+        extra["top_p"] = top_p
+    return extra
+
+
+def get_response(
+    message,
+    client,
+    server_prompt=None,
+    model=DEFAULT_MODEL,
+    stream=False,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+):
     if server_prompt is None:
         raise ValueError("server_prompt is required.")
     if not isinstance(server_prompt, dict):
@@ -21,12 +38,14 @@ def get_response(message, client, server_prompt=None, model=DEFAULT_MODEL, strea
     if "role" not in server_prompt or "content" not in server_prompt:
         raise ValueError("server_prompt must contain 'role' and 'content' keys.")
     messages = [server_prompt] + message
+    sampling = _completion_kwargs(temperature, top_p)
     try:
         response = client.chat.completions.create(
             model=model,
             messages=messages,
             stream=stream,
             response_format=JSON_RESPONSE_FORMAT,
+            **sampling,
         )
     except Exception as exc:
         if "response_format" not in str(exc).lower():
@@ -35,6 +54,7 @@ def get_response(message, client, server_prompt=None, model=DEFAULT_MODEL, strea
             model=model,
             messages=messages,
             stream=stream,
+            **sampling,
         )
     if stream:
         return response
@@ -135,13 +155,17 @@ class Session:
             display(Markdown(self.current_message))
         return payload
 
-    def _chat_stream(self, message, server_prompt, selected_model) -> Generator[str, None, None]:
+    def _chat_stream(
+        self, message, server_prompt, selected_model, temperature=None, top_p=None
+    ) -> Generator[str, None, None]:
         response_stream = get_response(
             message=message,
             client=self.client,
             server_prompt=server_prompt,
             model=selected_model,
-            stream=True
+            stream=True,
+            temperature=temperature,
+            top_p=top_p,
         )
 
         collected_chunks = []
@@ -157,7 +181,15 @@ class Session:
         full_response = ''.join(collected_chunks)
         self._finalize_payload(full_response)
 
-    def chat(self, message, server_prompt=None, model=None, stream=False):
+    def chat(
+        self,
+        message,
+        server_prompt=None,
+        model=None,
+        stream=False,
+        temperature=None,
+        top_p=None,
+    ):
         message_to_send = {'role': 'user', 'content': message}
         self.messages.append(message_to_send)
         self.display_messages.append(message_to_send)
@@ -166,5 +198,17 @@ class Session:
             raise ValueError("server_prompt is required.")
 
         if stream:
-            return self._chat_stream(message=self.messages, server_prompt=server_prompt, selected_model=selected_model)
-        return self._chat_single(message=self.messages, server_prompt=server_prompt, selected_model=selected_model)
+            return self._chat_stream(
+                message=self.messages,
+                server_prompt=server_prompt,
+                selected_model=selected_model,
+                temperature=temperature,
+                top_p=top_p,
+            )
+        return self._chat_single(
+            message=self.messages,
+            server_prompt=server_prompt,
+            selected_model=selected_model,
+            temperature=temperature,
+            top_p=top_p,
+        )

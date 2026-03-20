@@ -22,6 +22,8 @@ def run_interviewer_opening_turn(
     model: Optional[str] = None,
     stream: bool = False,
     hidden_user_content: Optional[str] = None,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
 ) -> Union[dict, Generator[str, None, None]]:
     """
     First interviewer turn after CV/JD analysis.
@@ -56,6 +58,8 @@ def run_interviewer_opening_turn(
                 server_prompt=server_prompt,
                 model=selected_model,
                 stream=True,
+                temperature=temperature,
+                top_p=top_p,
             )
             collected_chunks = []
             for chunk in response_stream:
@@ -77,5 +81,7 @@ def run_interviewer_opening_turn(
         server_prompt=server_prompt,
         model=selected_model,
         stream=False,
+        temperature=temperature,
+        top_p=top_p,
     )
     return session._finalize_payload(raw_content)

@@ -74,7 +74,7 @@ def initialize_state(client, default_model):
 
 st.set_page_config(page_title="jian_ling Interview App", page_icon=":briefcase:")
 st.title("jian_ling Interview App")
-st.caption("Upload CV PDF and job description, then start interview chat.")
+st.caption("Upload CV PDF and job description, generate analysis, then answer the interviewer's questions.")
 
 provider = st.sidebar.selectbox("LLM Provider", options=["OpenAI", "DeepSeek"])
 client = build_client(provider=provider)
@@ -118,6 +118,11 @@ model = st.sidebar.selectbox("Model", options=model_options, index=default_index
 st.session_state.interview_session.model = model
 selected_persona_name = st.sidebar.selectbox("Persona", options=list(PERSONA_OPTIONS.keys()), index=0)
 selected_task_name = st.sidebar.selectbox("Task", options=list(TASK_OPTIONS.keys()), index=0)
+
+with st.sidebar.expander("Generation settings", expanded=False):
+    st.caption("OpenAI sampling parameters for interview chat (and opening question).")
+    temperature = st.slider("Temperature", min_value=0.0, max_value=2.0, value=0.7, step=0.05)
+    top_p = st.slider("Top-p", min_value=0.01, max_value=1.0, value=1.0, step=0.01)
 
 st.sidebar.markdown("---")
 cv_file = st.sidebar.file_uploader("CV PDF", type=["pdf"], accept_multiple_files=False)
@@ -173,6 +178,8 @@ if st.sidebar.button("Generate Suitability Gap", type="primary"):
                 active_server_prompt,
                 model=model,
                 stream=False,
+                temperature=temperature,
+                top_p=top_p,
             )
 
 if st.session_state.analysis_ready:
@@ -237,6 +244,8 @@ if st.session_state.analysis_ready:
                 model=model,
                 server_prompt=active_server_prompt,
                 stream=True,
+                temperature=temperature,
+                top_p=top_p,
             ):
                 streamed_content += chunk
                 assistant_placeholder.markdown(streamed_content)
