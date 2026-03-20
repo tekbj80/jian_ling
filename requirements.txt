@@ -1,2 +1,0 @@
-# Install this repo as a package so `jian_ling` imports resolve (no per-file sys.path hacks).
--e .
