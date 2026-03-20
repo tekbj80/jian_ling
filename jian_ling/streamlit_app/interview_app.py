@@ -5,7 +5,11 @@ import streamlit as st
 from openai import OpenAI
 
 from jian_ling import Session
-from jian_ling.interview import analyze_cv_against_job_description, parse_analysis_output
+from jian_ling.interview import (
+    analyze_cv_against_job_description,
+    cv_job_analysis_accepted,
+    parse_analysis_output,
+)
 from jian_ling.interview.helpers import run_interviewer_opening_turn
 from jian_ling.prompts.personas import interview_personas as persona_defs
 from jian_ling.prompts.tasks import interview_tasks as task_defs
@@ -32,6 +36,17 @@ PERSONA_OPTIONS = {
 TASK_OPTIONS = task_defs.INTERVIEW_TASK_DICT
 if not TASK_OPTIONS:
     raise ValueError("INTERVIEW_TASK_DICT is empty. Add at least one interview task.")
+
+
+def _format_analysis_field(value):
+    """Render gaps/suitability whether the model returned a string or a list."""
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        lines = [str(x).strip() for x in value if str(x).strip()]
+        return "\n".join(f"{i + 1}. {line}" for i, line in enumerate(lines))
+    return str(value).strip()
+
 
 def build_client(provider):
     if provider == "OpenAI":
@@ -148,6 +163,8 @@ if st.sidebar.button("Generate Suitability Gap", type="primary"):
         st.sidebar.error("Please provide a job description.")
         st.stop()
 
+    # Keep st.stop() / errors outside st.spinner so the spinner context always exits cleanly
+    # (st.stop() inside the spinner can leave the UI stuck showing the spinner).
     with st.spinner("Uploading CV and generating suitability-gap analysis..."):
         cv_upload = client.files.create(file=cv_file, purpose="user_data")
         st.session_state.cv_file_id = cv_upload.id
@@ -160,27 +177,39 @@ if st.sidebar.button("Generate Suitability Gap", type="primary"):
             job_description=st.session_state.job_description,
             model=model,
         )
-        st.session_state.suitability_gap_text = parse_analysis_output(response)
-        st.session_state.analysis_ready = True
-        st.session_state.interview_session = Session(client=client, model=model)
 
-        opening_prompt = build_interviewer_prompt(
-            st.session_state.job_description,
-            st.session_state.suitability_gap_text,
-            TASK_OPTIONS[selected_task_name],
-            PERSONA_OPTIONS[selected_persona_name],
+    parsed = parse_analysis_output(response)
+    ok, rejection_message = cv_job_analysis_accepted(parsed)
+    if not ok:
+        st.session_state.analysis_ready = False
+        st.session_state.suitability_gap_text = parsed
+        st.error(rejection_message)
+        st.sidebar.error(
+            "Invalid CV or job description — fix your files or text and click Generate again."
         )
-        st.session_state.server_prompt_text = opening_prompt["content"]
-        active_server_prompt = {"role": "system", "content": st.session_state.server_prompt_text}
-        with st.spinner("Interviewer is asking the first question..."):
-            run_interviewer_opening_turn(
-                st.session_state.interview_session,
-                active_server_prompt,
-                model=model,
-                stream=False,
-                temperature=temperature,
-                top_p=top_p,
-            )
+        st.stop()
+
+    st.session_state.suitability_gap_text = parsed
+    st.session_state.analysis_ready = True
+    st.session_state.interview_session = Session(client=client, model=model)
+
+    opening_prompt = build_interviewer_prompt(
+        st.session_state.job_description,
+        st.session_state.suitability_gap_text,
+        TASK_OPTIONS[selected_task_name],
+        PERSONA_OPTIONS[selected_persona_name],
+    )
+    st.session_state.server_prompt_text = opening_prompt["content"]
+    active_server_prompt = {"role": "system", "content": st.session_state.server_prompt_text}
+    with st.spinner("Interviewer is asking the first question..."):
+        run_interviewer_opening_turn(
+            st.session_state.interview_session,
+            active_server_prompt,
+            model=model,
+            stream=False,
+            temperature=temperature,
+            top_p=top_p,
+        )
 
 if st.session_state.analysis_ready:
     with st.sidebar.expander("Uploaded CV File", expanded=False):
@@ -190,14 +219,19 @@ if st.session_state.analysis_ready:
     with st.expander("Suitability/Gap Analysis", expanded=True):
         analysis = st.session_state.suitability_gap_text
         if isinstance(analysis, dict):
-            gaps = str(analysis.get("gaps", "")).strip()
-            suitability = str(analysis.get("suitability", "")).strip()
+            if analysis.get("inputs_valid") is False:
+                st.warning(
+                    analysis.get("rejection_reason")
+                    or "These inputs were not accepted as a CV and job description."
+                )
+            gaps = analysis.get("gaps", "")
+            suitability = analysis.get("suitability", "")
 
             st.markdown("## Gaps")
-            st.markdown(gaps or "_No gaps returned._")
+            st.markdown(_format_analysis_field(gaps) or "_No gaps returned._")
 
             st.markdown("## Suitability")
-            st.markdown(suitability or "_No suitability points returned._")
+            st.markdown(_format_analysis_field(suitability) or "_No suitability points returned._")
         else:
             st.markdown(str(analysis))
     interviewer_prompt = build_interviewer_prompt(
