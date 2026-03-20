@@ -5,7 +5,33 @@ import streamlit as st
 from openai import OpenAI
 
 from jian_ling import Session
-from jian_ling.prompts.interview_prompt import JOB_CV_ANALYST_PROMPT, build_interviewer_prompt
+from jian_ling.interview import analyze_cv_against_job_description, parse_analysis_output
+from jian_ling.interview.helpers import run_interviewer_opening_turn
+from jian_ling.prompts.personas import interview_personas as persona_defs
+from jian_ling.prompts.tasks import interview_tasks as task_defs
+from jian_ling.prompts.interview_prompt import build_interviewer_prompt
+
+OPENAI_ALLOWED_MODELS = [
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4.1-nano",
+    "gpt-4o",
+    "gpt-4o-mini",
+]
+OPENAI_DEFAULT_MODEL = "gpt-4.1"
+
+# Input limits (misuse prevention / cost control)
+MAX_JOB_DESCRIPTION_CHARS = 8000
+MAX_CHAT_MESSAGE_CHARS = 8000
+
+PERSONA_OPTIONS = {
+    "Friendly HR Consultant": persona_defs.FRIENDLY_HR_PERSON.strip(),
+    "Qin Shi Huang": persona_defs.QIN_SHI_HUANG_PERSONA,
+}
+
+TASK_OPTIONS = task_defs.INTERVIEW_TASK_DICT
+if not TASK_OPTIONS:
+    raise ValueError("INTERVIEW_TASK_DICT is empty. Add at least one interview task.")
 
 def build_client(provider):
     if provider == "OpenAI":
@@ -28,38 +54,6 @@ def list_model_ids(client):
     return sorted({model.id for model in models if hasattr(model, "id")})
 
 
-def parse_analysis_output(response):
-    raw_text = getattr(response, "output_text", "") or ""
-    raw_text = raw_text.strip()
-    if not raw_text:
-        return "No analysis returned."
-
-    try:
-        payload = json.loads(raw_text)
-        if isinstance(payload, dict):
-            return payload
-    except Exception:
-        pass
-
-    return raw_text
-
-
-def analyze_cv_against_job_description(client, cv_file_id, job_description, model="gpt-5-mini"):
-    return client.responses.create(
-        model=model,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_file", "file_id": cv_file_id},
-                    {"type": "input_text", "text": f"This is the job description: {job_description}"},
-                ],
-            },
-            JOB_CV_ANALYST_PROMPT,
-        ],
-    )
-
-
 def initialize_state(client, default_model):
     if "interview_session" not in st.session_state:
         st.session_state.interview_session = Session(client=client, model=default_model)
@@ -80,7 +74,7 @@ def initialize_state(client, default_model):
 
 st.set_page_config(page_title="jian_ling Interview App", page_icon=":briefcase:")
 st.title("jian_ling Interview App")
-st.caption("Upload CV PDF and job description, then start interview chat.")
+st.caption("Upload CV PDF and job description, generate analysis, then answer the interviewer's questions.")
 
 provider = st.sidebar.selectbox("LLM Provider", options=["OpenAI", "DeepSeek"])
 client = build_client(provider=provider)
@@ -95,12 +89,40 @@ if not available_models:
     st.error(f"No models returned from {provider}.")
     st.stop()
 
-initialize_state(client=client, default_model=available_models[0])
+initial_default_model = (
+    OPENAI_DEFAULT_MODEL if provider == "OpenAI" and OPENAI_DEFAULT_MODEL in available_models else available_models[0]
+)
+initialize_state(client=client, default_model=initial_default_model)
+
+if provider == "OpenAI":
+    allowed_available_models = [m for m in OPENAI_ALLOWED_MODELS if m in available_models]
+    if not allowed_available_models:
+        st.error(
+            "None of the required OpenAI models are available for this API key/account. "
+            "Expected one of: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini."
+        )
+        st.stop()
+    model_options = allowed_available_models
+else:
+    model_options = available_models
+
+session_model = st.session_state.interview_session.model
+if provider == "OpenAI" and session_model not in model_options:
+    st.session_state.interview_session.model = OPENAI_DEFAULT_MODEL if OPENAI_DEFAULT_MODEL in model_options else model_options[0]
+elif provider != "OpenAI" and session_model not in model_options:
+    st.session_state.interview_session.model = model_options[0]
 
 default_model = st.session_state.interview_session.model
-default_index = available_models.index(default_model) if default_model in available_models else 0
-model = st.sidebar.selectbox("Model", options=available_models, index=default_index)
+default_index = model_options.index(default_model) if default_model in model_options else 0
+model = st.sidebar.selectbox("Model", options=model_options, index=default_index)
 st.session_state.interview_session.model = model
+selected_persona_name = st.sidebar.selectbox("Persona", options=list(PERSONA_OPTIONS.keys()), index=0)
+selected_task_name = st.sidebar.selectbox("Task", options=list(TASK_OPTIONS.keys()), index=0)
+
+with st.sidebar.expander("Generation settings", expanded=False):
+    st.caption("OpenAI sampling parameters for interview chat (and opening question).")
+    temperature = st.slider("Temperature", min_value=0.0, max_value=2.0, value=0.7, step=0.05)
+    top_p = st.slider("Top-p", min_value=0.01, max_value=1.0, value=1.0, step=0.01)
 
 st.sidebar.markdown("---")
 cv_file = st.sidebar.file_uploader("CV PDF", type=["pdf"], accept_multiple_files=False)
@@ -108,7 +130,9 @@ job_description_input = st.sidebar.text_area(
     "Job Description",
     value=st.session_state.job_description,
     height=220,
+    help=f"Maximum {MAX_JOB_DESCRIPTION_CHARS} characters.",
 )
+st.sidebar.caption(f"Job description: {len(job_description_input)} / {MAX_JOB_DESCRIPTION_CHARS} characters")
 
 if st.sidebar.button("Generate Suitability Gap", type="primary"):
     if provider != "OpenAI":
@@ -134,10 +158,29 @@ if st.sidebar.button("Generate Suitability Gap", type="primary"):
             client=client,
             cv_file_id=st.session_state.cv_file_id,
             job_description=st.session_state.job_description,
+            model=model,
         )
         st.session_state.suitability_gap_text = parse_analysis_output(response)
         st.session_state.analysis_ready = True
         st.session_state.interview_session = Session(client=client, model=model)
+
+        opening_prompt = build_interviewer_prompt(
+            st.session_state.job_description,
+            st.session_state.suitability_gap_text,
+            TASK_OPTIONS[selected_task_name],
+            PERSONA_OPTIONS[selected_persona_name],
+        )
+        st.session_state.server_prompt_text = opening_prompt["content"]
+        active_server_prompt = {"role": "system", "content": st.session_state.server_prompt_text}
+        with st.spinner("Interviewer is asking the first question..."):
+            run_interviewer_opening_turn(
+                st.session_state.interview_session,
+                active_server_prompt,
+                model=model,
+                stream=False,
+                temperature=temperature,
+                top_p=top_p,
+            )
 
 if st.session_state.analysis_ready:
     with st.sidebar.expander("Uploaded CV File", expanded=False):
@@ -158,8 +201,10 @@ if st.session_state.analysis_ready:
         else:
             st.markdown(str(analysis))
     interviewer_prompt = build_interviewer_prompt(
-        job_description=st.session_state.job_description,
-        job_suitability_analysis=st.session_state.suitability_gap_text,
+        st.session_state.job_description,
+        st.session_state.suitability_gap_text,
+        TASK_OPTIONS[selected_task_name],
+        PERSONA_OPTIONS[selected_persona_name],
     )
     st.session_state.server_prompt_text = interviewer_prompt["content"]
 
@@ -177,7 +222,14 @@ if st.session_state.analysis_ready:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    prompt = st.chat_input("Let's do this! Ask me anything...")
+    st.caption(
+        f"Each chat message: max {MAX_CHAT_MESSAGE_CHARS} characters "
+        f"(input stops accepting more once you reach the limit)."
+    )
+    prompt = st.chat_input(
+        "Your answer or follow-up...",
+        max_chars=MAX_CHAT_MESSAGE_CHARS,
+    )
     if prompt:
         active_server_prompt = {"role": "system", "content": st.session_state.server_prompt_text}
 
@@ -192,6 +244,8 @@ if st.session_state.analysis_ready:
                 model=model,
                 server_prompt=active_server_prompt,
                 stream=True,
+                temperature=temperature,
+                top_p=top_p,
             ):
                 streamed_content += chunk
                 assistant_placeholder.markdown(streamed_content)
