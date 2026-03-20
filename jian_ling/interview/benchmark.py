@@ -2,7 +2,11 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
-from .analysis import analyze_cv_against_job_description, parse_analysis_output
+from .analysis import (
+    analyze_cv_against_job_description,
+    cv_job_analysis_accepted,
+    parse_analysis_output,
+)
 
 
 PromptLike = Union[str, Dict[str, str]]
@@ -111,6 +115,9 @@ class InterviewBenchmark:
             model=self.analysis_model,
         )
         self.job_suitability_analysis = parse_analysis_output(analysis_response)
+        ok, msg = cv_job_analysis_accepted(self.job_suitability_analysis)
+        if not ok:
+            raise ValueError(msg)
         return self.job_suitability_analysis
 
     def run_interview(self, question_count: int = 5) -> List[Dict[str, str]]:

@@ -1,6 +1,29 @@
 import json
+from typing import Any, Tuple
 
 from jian_ling.prompts.interview_prompt import JOB_CV_ANALYST_PROMPT
+
+DEFAULT_REJECTION_MESSAGE = (
+    "We could not use these inputs. Please upload a CV/resume PDF and paste a real job description."
+)
+
+
+def cv_job_analysis_accepted(payload: Any) -> Tuple[bool, str]:
+    """
+    Returns (True, empty str) if analysis should proceed, or (False, user_message) if rejected.
+
+    Older model responses without ``inputs_valid`` are treated as accepted for backward compatibility.
+    """
+    if not isinstance(payload, dict):
+        return False, DEFAULT_REJECTION_MESSAGE
+
+    if "inputs_valid" in payload and payload["inputs_valid"] is False:
+        reason = payload.get("rejection_reason")
+        if isinstance(reason, str) and reason.strip():
+            return False, reason.strip()
+        return False, DEFAULT_REJECTION_MESSAGE
+
+    return True, ""
 
 
 def parse_analysis_output(response):
