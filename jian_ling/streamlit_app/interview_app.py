@@ -5,9 +5,10 @@ import streamlit as st
 from openai import OpenAI
 
 from jian_ling import Session
+from jian_ling.interview import analyze_cv_against_job_description, parse_analysis_output
 from jian_ling.prompts.personas import interview_personas as persona_defs
 from jian_ling.prompts.tasks import interview_tasks as task_defs
-from jian_ling.prompts.interview_prompt import JOB_CV_ANALYST_PROMPT, build_interviewer_prompt
+from jian_ling.prompts.interview_prompt import build_interviewer_prompt
 
 OPENAI_ALLOWED_MODELS = [
     "gpt-4.1",
@@ -46,38 +47,6 @@ def list_model_ids(client):
     response = client.models.list()
     models = getattr(response, "data", response)
     return sorted({model.id for model in models if hasattr(model, "id")})
-
-
-def parse_analysis_output(response):
-    raw_text = getattr(response, "output_text", "") or ""
-    raw_text = raw_text.strip()
-    if not raw_text:
-        return "No analysis returned."
-
-    try:
-        payload = json.loads(raw_text)
-        if isinstance(payload, dict):
-            return payload
-    except Exception:
-        pass
-
-    return raw_text
-
-
-def analyze_cv_against_job_description(client, cv_file_id, job_description, model=OPENAI_DEFAULT_MODEL):
-    return client.responses.create(
-        model=model,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_file", "file_id": cv_file_id},
-                    {"type": "input_text", "text": f"This is the job description: {job_description}"},
-                ],
-            },
-            JOB_CV_ANALYST_PROMPT,
-        ],
-    )
 
 
 def initialize_state(client, default_model):
