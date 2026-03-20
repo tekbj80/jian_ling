@@ -6,6 +6,7 @@ from openai import OpenAI
 
 from jian_ling import Session
 from jian_ling.interview import analyze_cv_against_job_description, parse_analysis_output
+from jian_ling.interview.helpers import run_interviewer_opening_turn
 from jian_ling.prompts.personas import interview_personas as persona_defs
 from jian_ling.prompts.tasks import interview_tasks as task_defs
 from jian_ling.prompts.interview_prompt import build_interviewer_prompt
@@ -18,6 +19,10 @@ OPENAI_ALLOWED_MODELS = [
     "gpt-4o-mini",
 ]
 OPENAI_DEFAULT_MODEL = "gpt-4.1"
+
+# Input limits (misuse prevention / cost control)
+MAX_JOB_DESCRIPTION_CHARS = 8000
+MAX_CHAT_MESSAGE_CHARS = 8000
 
 PERSONA_OPTIONS = {
     "Friendly HR Consultant": persona_defs.FRIENDLY_HR_PERSON.strip(),
@@ -120,7 +125,9 @@ job_description_input = st.sidebar.text_area(
     "Job Description",
     value=st.session_state.job_description,
     height=220,
+    help=f"Maximum {MAX_JOB_DESCRIPTION_CHARS} characters.",
 )
+st.sidebar.caption(f"Job description: {len(job_description_input)} / {MAX_JOB_DESCRIPTION_CHARS} characters")
 
 if st.sidebar.button("Generate Suitability Gap", type="primary"):
     if provider != "OpenAI":
@@ -151,6 +158,22 @@ if st.sidebar.button("Generate Suitability Gap", type="primary"):
         st.session_state.suitability_gap_text = parse_analysis_output(response)
         st.session_state.analysis_ready = True
         st.session_state.interview_session = Session(client=client, model=model)
+
+        opening_prompt = build_interviewer_prompt(
+            st.session_state.job_description,
+            st.session_state.suitability_gap_text,
+            TASK_OPTIONS[selected_task_name],
+            PERSONA_OPTIONS[selected_persona_name],
+        )
+        st.session_state.server_prompt_text = opening_prompt["content"]
+        active_server_prompt = {"role": "system", "content": st.session_state.server_prompt_text}
+        with st.spinner("Interviewer is asking the first question..."):
+            run_interviewer_opening_turn(
+                st.session_state.interview_session,
+                active_server_prompt,
+                model=model,
+                stream=False,
+            )
 
 if st.session_state.analysis_ready:
     with st.sidebar.expander("Uploaded CV File", expanded=False):
@@ -192,7 +215,14 @@ if st.session_state.analysis_ready:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    prompt = st.chat_input("Let's do this! Ask me anything...")
+    st.caption(
+        f"Each chat message: max {MAX_CHAT_MESSAGE_CHARS} characters "
+        f"(input stops accepting more once you reach the limit)."
+    )
+    prompt = st.chat_input(
+        "Your answer or follow-up...",
+        max_chars=MAX_CHAT_MESSAGE_CHARS,
+    )
     if prompt:
         active_server_prompt = {"role": "system", "content": st.session_state.server_prompt_text}
 
