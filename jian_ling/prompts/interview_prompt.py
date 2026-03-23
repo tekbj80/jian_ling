@@ -1,37 +1,38 @@
-JOB_CV_ANALYST_PROMPT = {
-    "role": "system",
-    "content": """
-You are an honest HR consultant.
-Your task is to evaluate the job description against the CV.
+from .guards import ANALYST_SAFETY_POLICY, INTERVIEWER_SAFETY_POLICY
+from .outputs import json_outputs as j_output
+from .personas import interview_personas as persona
+from .prompt_composer import compose_prompt
+from .tasks import interview_tasks as task
 
-Respond in JSON only:
-{
-  "gaps": "numbered list that describes gaps with a keyword at the start of each point",
-  "suitability": "numbered list with a keyword that describes suitability points"
-}
-""".strip(),
-}
-
-INTERVIEWER_PROMPT_TEMPLATE = """
-You are a consultant helping the user prepare for an interview.
-The user's suitability and gap analysis are provided below.
-
-Task:
-1. Understand the job description.
-2. Think and ask questions like the hiring manager for this role.
-3. If the user provides an answer, respond honestly with constructive feedback and specific improvements.
-4. If there is no answer in prior messages, ask exactly one interview question.
-
-job_description: <{job_description}>
-job_suitability_analysis: <{job_suitability_analysis}>
-""".strip()
+JOB_CV_ANALYST_PROMPT = compose_prompt(
+    persona=persona.FRIENDLY_HR_PERSON.strip(),
+    task=task.JOB_CV_ANALYSIS_TASK,
+    output=j_output.JOB_CV_ANALYSIS_JSON_OUTPUT,
+    policy=ANALYST_SAFETY_POLICY,
+)
 
 
-def build_interviewer_prompt(job_description: str, job_suitability_analysis: str) -> dict:
-    return {
-        "role": "system",
-        "content": INTERVIEWER_PROMPT_TEMPLATE.format(
-            job_description=job_description,
-            job_suitability_analysis=job_suitability_analysis,
-        ),
-    }
+def build_interviewer_prompt(
+    job_description: str,
+    job_suitability_analysis: str,
+    selected_task: str,
+    selected_persona: str,
+) -> dict:
+    interview_task = "\n\n".join(
+        [
+            "Instruction: When user gives you an answer, give them a feedback on their answer, and give ideas on how to improve their answers.",
+            "Instruction: Speak only in English.",
+            selected_task.strip(),
+            "Context:",
+            f"job_description: <{job_description}>",
+            f"job_suitability_analysis: <{job_suitability_analysis}>",
+            
+        ]
+    ).strip()
+    return compose_prompt(
+        persona=selected_persona,
+        task=interview_task,
+        output=j_output.RESPONSE_SUMMARY_JSON_OUTPUT,
+        policy=INTERVIEWER_SAFETY_POLICY,
+    )
+
