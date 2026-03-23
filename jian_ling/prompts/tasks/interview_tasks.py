@@ -1,4 +1,11 @@
-JOB_CV_ANALYSIS_TASK = "Evaluate the job description against the CV."
+JOB_CV_ANALYSIS_TASK = """
+First validate the two inputs (see output format for rules):
+1) The uploaded PDF should be a CV/resume.
+2) The provided text should be a job description / job posting.
+
+If validation fails, return inputs_valid false with a clear rejection_reason and empty gaps and suitability.
+If validation passes, set inputs_valid true, leave rejection_reason empty, then compare the job description to the CV and produce gaps and suitability as specified.
+""".strip()
 
 GAP_CRITICAL_TASK = """
 1. Critically review the gaps. 

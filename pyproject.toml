@@ -10,8 +10,9 @@ requires-python = ">=3.8"
 dependencies = [
   "openai",
   "ipython",
-  "streamlit",
+  "streamlit>=1.33",
 ]
 
-[tool.setuptools]
-packages = ["jian_ling", "jian_ling.streamlit_app"]
+# Install with `pip install -e .` so `import jian_ling` works everywhere (Streamlit Cloud, venv, etc.)
+[tool.setuptools.packages.find]
+where = ["."]
