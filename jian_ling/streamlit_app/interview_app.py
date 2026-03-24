@@ -5,6 +5,7 @@ import streamlit as st
 from openai import OpenAI
 
 from jian_ling import Session
+from jian_ling.chat_session import get_response
 from jian_ling.interview import (
     analyze_cv_against_job_description,
     cv_job_analysis_accepted,
@@ -13,7 +14,10 @@ from jian_ling.interview import (
 from jian_ling.interview.helpers import run_interviewer_opening_turn
 from jian_ling.prompts.personas import interview_personas as persona_defs
 from jian_ling.prompts.tasks import interview_tasks as task_defs
-from jian_ling.prompts.interview_prompt import build_interviewer_prompt
+from jian_ling.prompts.interview_prompt import (
+    build_interviewer_prompt,
+    build_session_summary_prompt,
+)
 
 OPENAI_ALLOWED_MODELS = [
     "gpt-4.1",
@@ -46,6 +50,97 @@ def _format_analysis_field(value):
         lines = [str(x).strip() for x in value if str(x).strip()]
         return "\n".join(f"{i + 1}. {line}" for i, line in enumerate(lines))
     return str(value).strip()
+
+
+def _suitability_context_for_prompt(value):
+    """Serialize analysis for embedding in a system prompt."""
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    return str(value).strip()
+
+
+def _format_transcript_for_summary(messages):
+    """Turn display_messages into markdown for the summarizer."""
+    if not messages:
+        return ""
+    blocks = []
+    for m in messages:
+        role = m.get("role", "")
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "user":
+            label = "Candidate"
+        elif role == "assistant":
+            label = "Interviewer"
+        else:
+            label = role
+        blocks.append(f"### {label}\n{content}")
+    return "\n\n".join(blocks)
+
+
+def _run_session_summary(client, model, temperature, top_p):
+    """Send full display transcript to summarizer; sets interview_session_summary or st.error."""
+    transcript = _format_transcript_for_summary(
+        st.session_state.interview_session.display_messages
+    )
+    if not transcript.strip():
+        st.warning("There is no interview dialogue to summarize yet.")
+        return
+
+    summary_sys = build_session_summary_prompt(
+        (st.session_state.job_description or "").strip(),
+        _suitability_context_for_prompt(st.session_state.suitability_gap_text),
+    )
+    user_payload = (
+        "Here is the full interview transcript.\n\n"
+        f"{transcript}\n\n"
+        "Produce the summary, feedback, and improvement suggestions as specified "
+        "in your instructions."
+    )
+    try:
+        with st.spinner("Summarizing your answers..."):
+            raw = get_response(
+                [{"role": "user", "content": user_payload}],
+                client,
+                server_prompt=summary_sys,
+                model=model,
+                stream=False,
+                temperature=temperature,
+                top_p=top_p,
+            )
+        try:
+            payload = Session._parse_json_payload(raw)
+            st.session_state.interview_session_summary = payload["response"]
+        except Exception:
+            text = (raw or "").strip()
+            st.session_state.interview_session_summary = (
+                text or "The model returned a response that could not be parsed as JSON."
+            )
+        st.success("Summary is ready — see Session summary below the chat.")
+    except Exception as exc:
+        st.error(f"Could not generate summary: {exc}")
+
+
+# Sidebar-only: style the session-summary primary button red (no primary buttons elsewhere in sidebar).
+_SIDEBAR_RED_PRIMARY_BUTTON_CSS = """
+<style>
+    div[data-testid="stSidebar"] button[kind="primary"],
+    div[data-testid="stSidebar"] [data-testid="baseButton-primary"] {
+        background-color: #c62828 !important;
+        border: 1px solid #b71c1c !important;
+        color: #ffffff !important;
+    }
+    div[data-testid="stSidebar"] button[kind="primary"]:hover,
+    div[data-testid="stSidebar"] [data-testid="baseButton-primary"]:hover {
+        background-color: #b71c1c !important;
+        border-color: #7f0000 !important;
+        color: #ffffff !important;
+    }
+</style>
+"""
 
 
 def build_client(provider):
@@ -81,6 +176,7 @@ def initialize_state(client, default_model):
         "job_description": "",
         "suitability_gap_text": "",
         "analysis_ready": False,
+        "interview_session_summary": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -89,7 +185,9 @@ def initialize_state(client, default_model):
 
 st.set_page_config(page_title="jian_ling Interview App", page_icon=":briefcase:")
 st.title("jian_ling Interview App")
-st.caption("Upload CV PDF and job description, generate analysis, then answer the interviewer's questions.")
+st.caption(
+    "Upload your CV PDF and job description below, generate analysis, then answer the interviewer's questions."
+)
 
 provider = st.sidebar.selectbox("LLM Provider", options=["OpenAI", "DeepSeek"])
 client = build_client(provider=provider)
@@ -139,28 +237,45 @@ with st.sidebar.expander("Generation settings", expanded=False):
     temperature = st.slider("Temperature", min_value=0.0, max_value=2.0, value=0.7, step=0.05)
     top_p = st.slider("Top-p", min_value=0.01, max_value=1.0, value=1.0, step=0.01)
 
-st.sidebar.markdown("---")
-cv_file = st.sidebar.file_uploader("CV PDF", type=["pdf"], accept_multiple_files=False)
-job_description_input = st.sidebar.text_area(
-    "Job Description",
-    value=st.session_state.job_description,
-    height=220,
-    help=f"Maximum {MAX_JOB_DESCRIPTION_CHARS} characters.",
-)
-st.sidebar.caption(f"Job description: {len(job_description_input)} / {MAX_JOB_DESCRIPTION_CHARS} characters")
+if st.session_state.analysis_ready:
+    st.sidebar.caption("Wrap-up: summarize everything you said so far (full transcript).")
+    st.sidebar.markdown(_SIDEBAR_RED_PRIMARY_BUTTON_CSS, unsafe_allow_html=True)
+    if st.sidebar.button(
+        "Stop and summarize",
+        type="primary",
+        use_container_width=True,
+        help="Send the full chat transcript to the model for a written summary and coaching.",
+        key="stop_summarize_sidebar",
+    ):
+        _run_session_summary(client, model, temperature, top_p)
 
-if st.sidebar.button("Generate Suitability Gap", type="primary"):
+st.sidebar.markdown("---")
+
+st.subheader("CV and job posting")
+cv_file = st.file_uploader("CV (PDF)", type=["pdf"], accept_multiple_files=False)
+st.text_area(
+    "Job description",
+    height=220,
+    key="job_description",
+    help=f"Maximum {MAX_JOB_DESCRIPTION_CHARS} characters.",
+    max_chars=MAX_JOB_DESCRIPTION_CHARS,
+)
+_jd = st.session_state.get("job_description") or ""
+st.caption(f"Job description: {len(_jd)} / {MAX_JOB_DESCRIPTION_CHARS} characters")
+
+if st.button("Generate suitability / gap analysis", type="primary"):
+    job_description_input = (st.session_state.get("job_description") or "").strip()
     if provider != "OpenAI":
-        st.sidebar.error("Suitability-gap analysis requires OpenAI due to file upload API.")
+        st.error("Suitability-gap analysis requires OpenAI due to the file upload API.")
         st.stop()
     if cv_file is None:
-        st.sidebar.error("Please select a PDF CV file.")
+        st.error("Please select a PDF CV file.")
         st.stop()
     if (cv_file.type or "").lower() not in {"application/pdf"} and not cv_file.name.lower().endswith(".pdf"):
-        st.sidebar.error("Selected file must be a PDF.")
+        st.error("Selected file must be a PDF.")
         st.stop()
-    if not job_description_input.strip():
-        st.sidebar.error("Please provide a job description.")
+    if not job_description_input:
+        st.error("Please provide a job description.")
         st.stop()
 
     # Keep st.stop() / errors outside st.spinner so the spinner context always exits cleanly
@@ -169,12 +284,11 @@ if st.sidebar.button("Generate Suitability Gap", type="primary"):
         cv_upload = client.files.create(file=cv_file, purpose="user_data")
         st.session_state.cv_file_id = cv_upload.id
         st.session_state.cv_file_name = getattr(cv_upload, "filename", cv_file.name)
-        st.session_state.job_description = job_description_input.strip()
 
         response = analyze_cv_against_job_description(
             client=client,
             cv_file_id=st.session_state.cv_file_id,
-            job_description=st.session_state.job_description,
+            job_description=job_description_input,
             model=model,
         )
 
@@ -184,17 +298,16 @@ if st.sidebar.button("Generate Suitability Gap", type="primary"):
         st.session_state.analysis_ready = False
         st.session_state.suitability_gap_text = parsed
         st.error(rejection_message)
-        st.sidebar.error(
-            "Invalid CV or job description — fix your files or text and click Generate again."
-        )
+        st.error("Invalid CV or job description — fix your inputs and click Generate again.")
         st.stop()
 
     st.session_state.suitability_gap_text = parsed
     st.session_state.analysis_ready = True
+    st.session_state.interview_session_summary = ""
     st.session_state.interview_session = Session(client=client, model=model)
 
     opening_prompt = build_interviewer_prompt(
-        st.session_state.job_description,
+        job_description_input,
         st.session_state.suitability_gap_text,
         TASK_OPTIONS[selected_task_name],
         PERSONA_OPTIONS[selected_persona_name],
@@ -256,6 +369,14 @@ if st.session_state.analysis_ready:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
+    if st.session_state.get("interview_session_summary"):
+        with st.expander("Session summary", expanded=True):
+            st.markdown(st.session_state.interview_session_summary)
+
+    st.caption(
+        "Use the red **Stop and summarize** button in the sidebar (under Generation settings) "
+        "for a full written summary of your answers."
+    )
     st.caption(
         f"Each chat message: max {MAX_CHAT_MESSAGE_CHARS} characters "
         f"(input stops accepting more once you reach the limit)."
@@ -285,4 +406,4 @@ if st.session_state.analysis_ready:
                 assistant_placeholder.markdown(streamed_content)
             assistant_placeholder.markdown(st.session_state.interview_session.current_message)
 else:
-    st.info("Use the sidebar to upload a PDF and generate suitability/gap first.")
+    st.info("When you are ready, use **Generate suitability / gap analysis** above to start.")

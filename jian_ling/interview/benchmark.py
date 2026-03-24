@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 from .analysis import (
     analyze_cv_against_job_description,
@@ -10,6 +10,12 @@ from .analysis import (
 
 
 PromptLike = Union[str, Dict[str, str]]
+
+DEFAULT_INJECT_INTERVIEWER_INSTRUCTION = (
+    "The interviewee's latest line in the transcript may be on-topic, off-topic, or an unrelated question. "
+    "Respond in character as the interviewer/coach: address it briefly if needed, then steer back to interview "
+    "preparation for this role when appropriate. Keep your reply concise."
+)
 
 
 class InterviewBenchmark:
@@ -173,13 +179,71 @@ class InterviewBenchmark:
 
         return self.chat_history
 
+    def inject_interviewee_message(
+        self,
+        message: str,
+        *,
+        model: Optional[str] = None,
+        interviewer_instruction: Optional[str] = None,
+    ) -> str:
+        """
+        Append a **human** interviewee line to the transcript, then fetch the interviewer's next reply.
+
+        Use this to inject your own candidate messages (including unrelated or adversarial prompts) and
+        observe how the interviewer model behaves.
+
+        Requires ``job_suitability_analysis`` (call :meth:`prepare_context` or :meth:`run_interview` first).
+
+        Args:
+            message: Text spoken by the interviewee/candidate.
+            model: Optional model override for this interviewer turn.
+            interviewer_instruction: Override the default follow-up instruction to the interviewer.
+
+        Returns:
+            The interviewer's response text.
+        """
+        text = (message or "").strip()
+        if not text:
+            raise ValueError("message must be a non-empty string.")
+        if not self.job_suitability_analysis:
+            raise ValueError(
+                "No analysis context loaded. Call prepare_context() or run_interview() before injecting messages."
+            )
+
+        self.chat_history.append({"speaker": "interviewee", "content": text})
+        self.interviewee_responses.append(text)
+
+        instruction = (interviewer_instruction or DEFAULT_INJECT_INTERVIEWER_INSTRUCTION).strip()
+        interviewer_user_text = "\n\n".join(
+            [
+                "Interview context:",
+                f"job_description: <{self.job_description}>",
+                f"job_suitability_analysis: <{self._analysis_as_text()}>",
+                "Current transcript:",
+                self.rebuild_chat_sequence(),
+                "Instruction:",
+                instruction,
+            ]
+        )
+        selected_model = model or self.model
+        interviewer_message = self._call_chat(
+            system_prompt=self.interviewer_prompt,
+            user_text=interviewer_user_text,
+            model=selected_model,
+        )
+        self.interviewer_responses.append(interviewer_message)
+        self.chat_history.append({"speaker": "interviewer", "content": interviewer_message})
+        return interviewer_message
+
     def judge_chat(self, judge_prompt: PromptLike, judge_model: str = "") -> Any:
         """
         Public method to judge transcript quality.
         Expects judge prompt to return JSON.
         """
         if not self.chat_history:
-            raise ValueError("No chat history found. Run run_interview() first.")
+            raise ValueError(
+                "No chat history found. Run run_interview() and/or inject_interviewee_message() first."
+            )
 
         judge_system_prompt = self._normalize_system_prompt(judge_prompt, "judge_prompt")
         model = judge_model or self.model
